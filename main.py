@@ -1,110 +1,162 @@
 # importar as bibliotecas
 import streamlit as st
 import pandas as pd
-import yfinance as yf
-from datetime import timedelta
+from binance.client import Client
+from datetime import datetime, timedelta
+import time
 
-# criar as funções de carregamento de dados
-    # Cotações do Itau - ITUB4 - 2010 a 2024
+# inicialização da Binance (sem autenticação para dados públicos)
+client = Client()
+
+# Configuração da página
+st.set_page_config(page_title="📈 Dashboard Cripto Binance", layout="wide")
+
+# Estilo CSS com imagem de fundo
+st.markdown(
+    """
+    <style>
+    .stApp {
+        background-image: url("fundo_cripto.jpg");
+        background-size: cover;
+        background-position: center;
+        background-attachment: fixed;
+    }
+    .block-container {
+        background-color: rgba(255, 255, 255, 0.85);
+        padding: 2rem;
+        border-radius: 1rem;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True
+)
+
+# Função para obter o preço atual
+@st.cache_data(ttl=60)
+def obter_preco_atual(pares):
+    precos = {}
+    for par in pares:
+        try:
+            ticker = client.get_symbol_ticker(symbol=par)
+            precos[par] = float(ticker['price'])
+        except:
+            precos[par] = None
+    return precos
+
+# Função para carregar dados históricos
 @st.cache_data
-def carregar_dados(empresas):
-    texto_tickers = " ".join(empresas)
-    dados_acao = yf.Tickers(texto_tickers)
-    cotacoes_acao = dados_acao.history(period="1d", start="2010-01-01", end="2025-04-30")
-    cotacoes_acao = cotacoes_acao["Close"]
-    return cotacoes_acao
+def carregar_dados(pares, intervalo='1d', limite=1000):
+    df_completo = pd.DataFrame()
+    for par in pares:
+        try:
+            klines = client.get_klines(symbol=par, interval=intervalo, limit=limite)
+            df = pd.DataFrame(klines, columns=[
+                "timestamp", "Open", "High", "Low", "Close", "Volume",
+                "Close time", "Quote asset volume", "Number of trades",
+                "Taker buy base asset volume", "Taker buy quote asset volume", "Ignore"
+            ])
+            df["timestamp"] = pd.to_datetime(df["timestamp"], unit='ms')
+            df.set_index("timestamp", inplace=True)
+            df = df[["Close"]].astype(float)
+            df.rename(columns={"Close": par}, inplace=True)
+            df_completo = pd.concat([df_completo, df], axis=1)
+            time.sleep(0.2)  # evitar rate limit
+        except:
+            continue
+    return df_completo
 
-@st.cache_data
-def carregar_tickers_acoes():
-    base_tickers = pd.read_csv("IBOV.csv", sep=";")
-    tickers = list(base_tickers["Codigo"])
-    tickers = [item + ".SA" for item in tickers]
-    return tickers
+# Lista de criptos
+criptos = [
+    "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT",
+    "XRPUSDT", "ADAUSDT", "AVAXUSDT", "DOGEUSDT"
+]
 
-acoes = [
-    "BBSE3.SA", "CVCB3.SA", "B3SA3.SA", "ITUB4.SA", "VALE3.SA",
-      "PETR4.SA", "ITSA4.SA", "BBDC4.SA", "EGIE3.SA", "WEGE3.SA"
-      "MRVE3.SA", "CPFE3.SA", "CMIG4.SA", "ELET3.SA", "SBSP3.SA"
-      "AZUL4.SA", "SANB11.SA", "GOLL4.SA", "BBDC4.SA", "MGLU3.SA"
-      ]
-dados = carregar_dados(acoes)
+# Cabeçalho
+st.title("📊 Dashboard de Criptomoedas (Binance)")
+st.markdown("Acompanhe o desempenho histórico e atual de criptomoedas populares.")
+st.divider()
 
+# Preços atuais
+st.subheader("💰 Preços em Tempo Quase-Real")
+precos_atuais = obter_preco_atual(criptos[:6])
+colunas = st.columns(3)
 
-# criar a interface do streamlit
-st.write("""
-# App Preço de Ações
-O gráfico abaixo representa a evolução do preço das ações ao longo dos anos
-""") # markdown
+for i, (par, preco) in enumerate(precos_atuais.items()):
+    with colunas[i % 3]:
+        st.metric(label=f"**{par}**", value=f"US$ {preco:.2f}" if preco else "N/D")
 
-# prepara as visualizações = filtros
-st.sidebar.header("Filtros")
+st.divider()
 
-# filtro de acoes
-lista_acoes = st.sidebar.multiselect("Escolha as ações para visualizar", dados.columns)
-if lista_acoes:
-    dados = dados[lista_acoes]
-    if len(lista_acoes) == 1:
-        acao_unica = lista_acoes[0]
-        dados = dados.rename(columns={acao_unica: "Close"})
-        
-# filtro de datas
-data_inicial = dados.index.min().to_pydatetime()
-data_final = dados.index.max().to_pydatetime()
-intervalo_data = st.sidebar.slider("Selecione o período", 
-                                   min_value=data_inicial, 
-                                   max_value=data_final,
-                                   value=(data_inicial, data_final),
-                                   step=timedelta(days=1))
+# Filtros
+st.sidebar.header("⚙️ Filtros")
+dados = carregar_dados(criptos)
 
-dados = dados.loc[intervalo_data[0]:intervalo_data[1]]
+if dados.empty:
+    st.error("❌ Nenhum dado foi carregado. Verifique sua conexão ou se os pares estão corretos.")
+    st.stop()
 
-# criar o grafico
-st.line_chart(dados)
+lista_opcoes = dados.columns.tolist()
+selecionadas = st.sidebar.multiselect("Escolha as criptomoedas", lista_opcoes, default=lista_opcoes[:3])
 
+if not selecionadas:
+    st.warning("Selecione pelo menos uma criptomoeda para visualizar.")
+    st.stop()
 
-# calculo de perfomance
-texto_performance_ativos = ""
+dados = dados[selecionadas]
+if len(selecionadas) == 1:
+    dados = dados.rename(columns={selecionadas[0]: "Close"})
 
-if len(lista_acoes)==0:
-    lista_acoes = list(dados.columns)
-elif len(lista_acoes)==1:
-    dados = dados.rename(columns={"Close": acao_unica})
+# Validação de datas
+data_inicial = dados.index.min()
+data_final = dados.index.max()
 
+# Slider de data
+intervalo = st.sidebar.slider(
+    "📅 Intervalo de datas",
+    min_value=data_inicial.to_pydatetime(),
+    max_value=data_final.to_pydatetime(),
+    value=(data_inicial.to_pydatetime(), data_final.to_pydatetime()),
+    step=timedelta(days=1)
+)
 
-carteira = [1000 for acao in lista_acoes]
-total_inicial_carteira = sum(carteira)
+# Filtra dados
+dados_filtrados = dados.loc[intervalo[0]:intervalo[1]]
 
-for i, acao in enumerate(lista_acoes):
-    performance_ativo = dados[acao].iloc[-1] / dados[acao].iloc[0] - 1
-    performance_ativo = float(performance_ativo)
-
-    carteira[i] = carteira[i] * (1 + performance_ativo)
-
-    if performance_ativo > 0:
-        # :cor[texto]
-        texto_performance_ativos = texto_performance_ativos + f"  \n{acao}: :green[{performance_ativo:.1%}]"
-    elif performance_ativo < 0:
-        texto_performance_ativos = texto_performance_ativos + f"  \n{acao}: :red[{performance_ativo:.1%}]"
-    else:
-        texto_performance_ativos = texto_performance_ativos + f"  \n{acao}: {performance_ativo:.1%}"
-
-total_final_carteira = sum(carteira)
-performance_carteira = total_final_carteira / total_inicial_carteira - 1
-
-if performance_carteira > 0:
-    texto_performance_carteira = f"Performance da carteira com todos os ativos: :green[{performance_carteira:.1%}]"
-elif performance_carteira < 0:
-    texto_performance_carteira = f"Performance da carteira com todos os ativos: :red[{performance_carteira:.1%}]"
+# Gráfico de evolução
+st.subheader("📈 Evolução dos Preços")
+if dados_filtrados.dropna(how="all").empty:
+    st.warning("🔍 Nenhum dado encontrado para o período selecionado.")
 else:
-    texto_performance_carteira = f"Performance da carteira com todos os ativos: {performance_carteira:.1%}"
+    st.line_chart(dados_filtrados.dropna(how="all"), use_container_width=True)
 
+    # Performance individual
+    st.subheader("📊 Performance Individual")
+    precos_iniciais = dados_filtrados.iloc[0]
+    precos_finais = dados_filtrados.iloc[-1]
+    retornos = precos_finais / precos_iniciais - 1
+    retornos = retornos.replace([float('inf'), -float('inf')], 0).fillna(0)
 
+    texto_performance = ""
+    for par, retorno in retornos.items():
+        cor = ":green" if retorno > 0 else ":red" if retorno < 0 else ""
+        texto_performance += f"\n{par}: {cor}[{retorno:.1%}]"
+    st.markdown(texto_performance)
 
-st.write(f"""
-### Performance dos Ativos
-Essa foi a perfomance de cada ativo no período selecionado:
+    # Performance da carteira
+    st.subheader("💼 Performance da Carteira")
+    total_inicial = 1000 * len(retornos)
+    total_final = (retornos + 1) * 1000
+    retorno_carteira = total_final.sum() / total_inicial - 1
+    cor_total = ":green" if retorno_carteira > 0 else ":red" if retorno_carteira < 0 else ""
+    st.markdown(f"**Retorno total:** {cor_total}[{retorno_carteira:.1%}]")
 
-{texto_performance_ativos}
+    # Evolução da carteira
+    norm = dados_filtrados.divide(dados_filtrados.iloc[0])
+    norm = norm.replace([float("inf"), -float("inf")], 0).fillna(0)
+    valores_carteira = norm.multiply(1000).sum(axis=1)
 
-{texto_performance_carteira}
-""")
+    st.subheader("📉 Evolução da Carteira")
+    if valores_carteira.dropna().empty:
+        st.warning("⚠️ Não há dados suficientes para calcular a evolução da carteira.")
+    else:
+        st.area_chart(valores_carteira, use_container_width=True)
